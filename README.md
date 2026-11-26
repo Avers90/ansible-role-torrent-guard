@@ -53,7 +53,7 @@ silently never matches.
 Every run writes one line to journald and `/var/log/torrent-guard/torrent-guard.log`:
 
 ```
-2026-11-26T12:05:09Z collect: mode=monitor rules_rebuilt=False peers=180 active=64 hits={'dht': 412, 'trk': 3} orphan_hits=0 buffer=71 suspects=2
+2026-11-26T12:05:09Z collect: mode=monitor rules_rebuilt=False peers=180 active=64 hits={'dht': 412, 'trk': 3} orphan_hits=0 buffer=71 with_hits=2
 2026-11-26T13:04:41Z push: HTTP 200, sent 71 entries
 ```
 
@@ -78,7 +78,7 @@ Every run writes one line to journald and `/var/log/torrent-guard/torrent-guard.
 | `torrent_guard_push_on_calendar` | `hourly` | Push schedule (`OnCalendar`) |
 | `torrent_guard_push_randomized_delay` | `10min` | Push jitter |
 | `torrent_guard_push_timeout` | `30` | HTTP timeout, seconds |
-| `torrent_guard_max_entries` | `20000` | Buffer cap (peers) |
+| `torrent_guard_max_entries` | `5000` | Buffer cap (peers) |
 | `torrent_guard_cpu_quota` / `_memory_max` | `10%` / `128M` | systemd limits |
 | `torrent_guard_log_dir` | `/var/log/torrent-guard` | Own log file, empty = journald only |
 | `torrent_guard_log_rotate_weeks` | `8` | logrotate: weekly, N kept |

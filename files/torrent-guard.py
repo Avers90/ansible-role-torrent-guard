@@ -41,7 +41,7 @@ URL = os.environ.get("TG_URL", "")
 TOKEN = os.environ.get("TG_TOKEN", "")
 TIMEOUT = int(os.environ.get("TG_TIMEOUT", "30"))
 STATE_DIR = os.environ.get("TG_STATE_DIR", "/var/lib/torrent-guard")
-MAX_ENTRIES = int(os.environ.get("TG_MAX_ENTRIES", "20000"))
+MAX_ENTRIES = int(os.environ.get("TG_MAX_ENTRIES", "5000"))
 SET_TIMEOUT = int(os.environ.get("TG_SET_TIMEOUT", "86400"))
 FIRST_PACKETS = int(os.environ.get("TG_FIRST_PACKETS", "4"))
 LOG_FILE = os.environ.get("TG_LOG_FILE", "")
@@ -53,18 +53,20 @@ LOCK = os.path.join(STATE_DIR, "lock")
 CHAIN = "TORRENT_GUARD"
 MARK = "0x7470"
 SKIP_PORTS = "53,443"
-## UDP destination ports that are normal for regular apps (DNS, NTP, QUIC, STUN)
 COMMON_UDP_PORTS = {53, 123, 443, 3478, 3479, 19302}
 
-## kind -> iptables match arguments. Offsets are from the start of the IP header
-## (IPv4 20 + UDP 8 = payload at 28). Only the first packets of a flow are scanned.
+## xt_string offsets count from the start of the IP header
+UDP_PAYLOAD = 20 + 8
+
+## kind -> iptables match arguments
 SIGNATURES = [
-    ("trk", ["-p", "udp", "-m", "string", "--algo", "bm",
-             "--hex-string", "|0000041727101980|", "--from", "28", "--to", "40"]),
-    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm",
-             "--string", "d1:ad2:id20:", "--from", "28", "--to", "64"]),
-    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm",
-             "--string", "1:rd2:id20:", "--from", "28", "--to", "96"]),
+    ("trk", ["-p", "udp", "-m", "string", "--algo", "bm", "--hex-string", "|0000041727101980|",
+             "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 12)]),
+    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", "d1:ad2:id20:",
+             "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 36)]),
+    # BEP 42: a reply may start with the "ip" key, so "1:r..." is not at offset 0
+    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", "1:rd2:id20:",
+             "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 68)]),
     ("bt", ["-m", "string", "--algo", "bm", "--string", "BitTorrent protocol", "--to", "160"]),
     ("http", ["-p", "tcp", "-m", "string", "--algo", "bm", "--string", "info_hash=", "--to", "1024"]),
     ("ext", ["-m", "string", "--algo", "bm", "--string", "ut_metadata"]),
@@ -76,7 +78,6 @@ KV_RE = re.compile(r"(src|dst|sport|dport)=(\S+)")
 
 
 def log(msg):
-    """stdout -> journald; plus a UTC-stamped line in LOG_FILE (if set)."""
     print(msg, flush=True)
     if not LOG_FILE:
         return
@@ -125,8 +126,12 @@ def rule_plan(mode):
         chains[sub_chain(kind)] = rules
     spec = json.dumps({"iface": IFACE, "timeout": SET_TIMEOUT, "chains": chains}, sort_keys=True)
     version = hashlib.sha256(spec.encode()).hexdigest()[:12]
-    chains[CHAIN].insert(0, ["-m", "comment", "--comment", f"torrent-guard {mode} {version}"])
+    chains[CHAIN].insert(0, ["-m", "comment", "--comment", rule_tag(mode, version)])
     return version, chains
+
+
+def rule_tag(mode, version):
+    return f"torrent-guard {mode} {version}"
 
 
 def rule_commands(mode):
@@ -146,18 +151,17 @@ def jump_rule():
     return ["FORWARD", "-i", IFACE, "-j", CHAIN]
 
 
+def jump_present():
+    return run(["iptables", "-t", "mangle", "-C"] + jump_rule(), check=False).returncode == 0
+
+
 def rules_current(mode):
-    """Live chain carries the expected version tag and FORWARD jumps into it."""
     version, _ = rule_plan(mode)
     live = run(["iptables", "-t", "mangle", "-S", CHAIN], check=False)
-    if live.returncode != 0 or f"torrent-guard {mode} {version}" not in live.stdout:
-        return False
-    jump = run(["iptables", "-t", "mangle", "-C"] + jump_rule(), check=False)
-    return jump.returncode == 0
+    return live.returncode == 0 and rule_tag(mode, version) in live.stdout and jump_present()
 
 
 def ensure_rules(dry_run=False):
-    """Rebuild only when missing or outdated (e.g. a firewall run flushed mangle)."""
     if rules_current(MODE):
         return False
     cmds = rule_commands(MODE)
@@ -169,7 +173,7 @@ def ensure_rules(dry_run=False):
     for cmd in cmds:
         # -N on an existing chain fails; everything else must succeed
         run(cmd, check=cmd[3:4] != ["-N"])
-    if run(["iptables", "-t", "mangle", "-C"] + jump_rule(), check=False).returncode != 0:
+    if not jump_present():
         run(["iptables", "-t", "mangle", "-A"] + jump_rule())
     log(f"rules: applied mode={MODE} iface={IFACE}")
     return True
@@ -227,28 +231,28 @@ def parse_ipset(text):
 
 
 def parse_conntrack(text, known):
-    """conntrack -L lines -> {src: {"flows", "dsts", "udp_hi"}} for src in `known`."""
+    """conntrack -L -f ipv4 lines -> {src: {"flows", "dsts", "udp_hi"}} for src in `known`.
+    IPv4 output is already canonical, so addresses are compared as printed."""
     stats = {}
     for line in text.splitlines():
-        fields = line.split()
-        if not fields:
+        start = line.find(" src=")
+        if start < 0:
+            continue
+        src = line[start + 5:line.find(" ", start + 5)]
+        if src not in known:  # most flows: the host itself or other peers' replies
             continue
         orig = {}
-        for key, val in KV_RE.findall(line):
-            if key in orig:  # second src= starts the reply tuple
+        for m in KV_RE.finditer(line, start):
+            if m.group(1) in orig:  # second src= starts the reply tuple
                 break
-            orig[key] = val
-        try:
-            src = norm_ip(orig["src"])
-            dst = norm_ip(orig["dst"])
-        except (KeyError, ValueError):
-            continue
-        if src not in known:
+            orig[m.group(1)] = m.group(2)
+        dst = orig.get("dst")
+        if not dst:
             continue
         cur = stats.setdefault(src, {"flows": 0, "dsts": set(), "udp_hi": 0})
         cur["flows"] += 1
         cur["dsts"].add(dst)
-        if fields[0] == "udp":
+        if line.split(None, 1)[0] == "udp":
             try:
                 dport = int(orig.get("dport", "0"))
             except ValueError:
@@ -290,6 +294,10 @@ def save_json(path, data):
 
 def load_buffer():
     return load_json(BUFFER, {}).get("entries", {})
+
+
+def save_buffer(entries):
+    save_json(BUFFER, {"version": 1, "entries": entries})
 
 
 def read_counters():
@@ -356,14 +364,14 @@ def collect(dry_run=False):
     for key, delta in deltas.items():
         kind = key.split("|", 1)[0]
         hits[kind] = hits.get(kind, 0) + delta
-    suspects = sum(1 for e in entries.values() if e["hits"])
+    with_hits = sum(1 for e in entries.values() if e["hits"])
     prefix = "collect (dry-run)" if dry_run else "collect"
     log(f"{prefix}: mode={MODE} rules_rebuilt={rebuilt} peers={len(peers)} active={len(stats)} "
-        f"hits={hits} orphan_hits={orphan} buffer={len(entries)} suspects={suspects}")
+        f"hits={hits} orphan_hits={orphan} buffer={len(entries)} with_hits={with_hits}")
     if dry_run:
         return
     save_json(COUNTERS, counters)
-    save_json(BUFFER, {"version": 1, "entries": entries})
+    save_buffer(entries)
 
 
 def push(dry_run=False):
@@ -398,7 +406,7 @@ def push(dry_run=False):
     except (urllib.error.URLError, OSError) as exc:
         log(f"push: {exc}, buffer kept ({len(entries)} entries)")
         sys.exit(1)
-    save_json(BUFFER, {"version": 1, "entries": {}})
+    save_buffer({})
     log(f"push: HTTP {status}, sent {len(entries)} entries")
 
 
@@ -414,11 +422,11 @@ def status(dry_run=False):
         for kind, n in e["hits"].items():
             hits[kind] = hits.get(kind, 0) + n
     log(json.dumps({"mode": MODE, "rules_current": rules_current(MODE), "entries": len(entries),
-                    "suspects": sum(1 for e in entries.values() if e["hits"]), "hits": hits}))
+                    "with_hits": sum(1 for e in entries.values() if e["hits"]), "hits": hits}))
 
 
 def show(dry_run=False):
-    """Buffer since the last push: suspects first, then by peak flows."""
+    """Buffer since the last push: peers with hits first, then by peak flows."""
     entries = load_buffer()
     log(f"{'pubkey':44}  {'hits':32}  flows  dsts  udp_hi  samples")
     rows = sorted(entries.items(),
@@ -442,9 +450,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             actions[cmd](dry_run)
-        except SystemExit:
-            raise
-        except Exception as exc:  # iptables/conntrack/awg failed etc. — leave a trace in the file too
+        except Exception as exc:
             log(f"{cmd}: error: {exc}")
             sys.exit(1)
 

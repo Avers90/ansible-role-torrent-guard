@@ -32,8 +32,8 @@ torrent_guard_push_on_calendar: hourly
 torrent_guard_push_randomized_delay: 10min
 torrent_guard_push_timeout: 30
 
-## Safety cap for the local buffer (entries = peers)
-torrent_guard_max_entries: 20000
+## Safety cap for the local buffer (entries = peers); keep <= the receiver limit
+torrent_guard_max_entries: 5000
 
 ## Own log file (in addition to journald). Empty dir = journald only.
 ## Rotated weekly, N weeks kept.
