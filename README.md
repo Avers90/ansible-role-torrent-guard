@@ -34,7 +34,8 @@ destination IPs, and the fan-out — distinct destination hosts and ports outsid
 common service ports (web, DNS, mail, STUN/TURN/RTP, NTP, push, Windows Update
 delivery). The buffer keeps the maximum seen since the last push. A torrent client
 spreads over many hosts **and** many ports; a call or a game launcher reaches many
-hosts on a few ports, a browser stays on 443.
+hosts on a few ports, a browser stays on 443. `udp_hi` (UDP flows to high ports) skips the same
+common ports.
 
 In `block` mode a hit also sets a connmark and drops the packet; later packets of
 the marked flow are dropped too. The peer's other traffic is not affected.

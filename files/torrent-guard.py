@@ -65,14 +65,14 @@ COMMON_PORTS = frozenset(
 
 ## xt_string offsets count from the start of the IP header
 UDP_PAYLOAD = 20 + 8
-## xt_u32: start of the UDP payload whatever the IP header length
-U32_PAYLOAD = "0>>22&0x3C@"
+## xt_u32: start of the UDP header whatever the IP header length (payload = +8)
+U32_L4 = "0>>22&0x3C@"
 
 ## kind -> iptables match arguments
 SIGNATURES = [
     # BEP 15 connect: magic 0x41727101980 + action 0
     ("trk", ["-p", "udp", "-m", "u32", "--u32",
-             f"{U32_PAYLOAD}8=0x417 && {U32_PAYLOAD}12=0x27101980 && {U32_PAYLOAD}16=0"]),
+             f"{U32_L4}8=0x417 && {U32_L4}12=0x27101980 && {U32_L4}16=0"]),
     ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", "d1:ad2:id20:",
              "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 36)]),
     # BEP 42: a reply may start with the "ip" key, so "1:r..." is not at offset 0
@@ -85,8 +85,8 @@ SIGNATURES = [
     # The uTP header stays plain under MSE, so this sees encrypted peers too. A bare
     # 0x4100 also matches TURN/WebRTC media; the full header check does not.
     ("utp", ["-p", "udp", "-m", "u32", "--u32",
-             f"{U32_PAYLOAD}8>>16=0x4100 && {U32_PAYLOAD}8&0xFFFF=1:0xFFFF"
-             f" && {U32_PAYLOAD}16=0 && {U32_PAYLOAD}24>>16=1"]),
+             f"{U32_L4}8>>16=0x4100 && {U32_L4}8&0xFFFF=1:0xFFFF"
+             f" && {U32_L4}16=0 && {U32_L4}24>>16=1"]),
     ("bt", ["-m", "string", "--algo", "bm", "--string", "BitTorrent protocol", "--to", "160"]),
     ("http", ["-p", "tcp", "-m", "string", "--algo", "bm", "--string", "info_hash=", "--to", "1024"]),
     ("ext", ["-m", "string", "--algo", "bm", "--string", "ut_metadata"]),
@@ -283,12 +283,15 @@ def parse_conntrack(text, known):
                                      "fan_hosts": set(), "fan_ports": set()})
         cur["flows"] += 1
         cur["dsts"].add(dst)
-        dport = orig.get("dport")
-        if dport is None or not dport.isdigit() or int(dport) in COMMON_PORTS:
+        dport = orig.get("dport", "")
+        if not dport.isdigit():
+            continue
+        port = int(dport)
+        if port in COMMON_PORTS:
             continue
         cur["fan_hosts"].add(dst)
-        cur["fan_ports"].add(dport)
-        if int(dport) >= 1024 and line.split(None, 1)[0] == "udp":
+        cur["fan_ports"].add(port)
+        if port >= 1024 and line.split(None, 1)[0] == "udp":
             cur["udp_hi"] += 1
     return {ip: {m: len(v) if isinstance(v, set) else v for m, v in s.items()}
             for ip, s in stats.items()}
