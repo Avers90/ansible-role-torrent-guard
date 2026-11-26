@@ -27,6 +27,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -81,12 +82,14 @@ SIGNATURES = [
     # Keys nDPI looks for anywhere: clients that do not sort the bencode dict
     ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", ":info_hash20:"]),
     ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", ":target20:"]),
-    # BEP 29 ST_SYN: version 1/type SYN, no extension, conn_id != 0, tdiff 0, seq 1.
-    # The uTP header stays plain under MSE, so this sees encrypted peers too. A bare
-    # 0x4100 also matches TURN/WebRTC media; the full header check does not.
+    # BEP 29 ST_SYN: version 1/type SYN, no extension, conn_id != 0, timestamp != 0,
+    # tdiff 0, bare 20-byte header (UDP length 28). seq_nr is not checked: libtorrent
+    # (qBittorrent, Deluge) starts it at random, not at 1. The uTP header stays plain
+    # under MSE, so this sees encrypted peers too. A bare 0x4100 also matches
+    # TURN/WebRTC media; the full header check does not.
     ("utp", ["-p", "udp", "-m", "u32", "--u32",
-             f"{U32_L4}8>>16=0x4100 && {U32_L4}8&0xFFFF=1:0xFFFF"
-             f" && {U32_L4}16=0 && {U32_L4}24>>16=1"]),
+             f"{U32_L4}4>>16=28 && {U32_L4}8>>16=0x4100 && {U32_L4}8&0xFFFF=1:0xFFFF"
+             f" && {U32_L4}12=1:0xFFFFFFFF && {U32_L4}16=0"]),
     ("bt", ["-m", "string", "--algo", "bm", "--string", "BitTorrent protocol", "--to", "160"]),
     ("http", ["-p", "tcp", "-m", "string", "--algo", "bm", "--string", "info_hash=", "--to", "1024"]),
     ("ext", ["-m", "string", "--algo", "bm", "--string", "ut_metadata"]),
@@ -472,6 +475,7 @@ def show(dry_run=False):
 
 
 def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `torrent-guard show | head`
     args = sys.argv[1:]
     dry_run = "--dry-run" in args
     args = [a for a in args if a != "--dry-run"]

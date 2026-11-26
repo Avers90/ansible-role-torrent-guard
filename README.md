@@ -16,7 +16,7 @@ flow (`connbytes`), skipping TCP/UDP 53 and 443:
 |---|---|---|
 | `tg_trk` | UDP tracker connect (BEP 15) | `u32`: magic `0x41727101980` + action 0 |
 | `tg_dht` | DHT query / reply (KRPC) | `d1:ad2:id20:` / `1:rd2:id20:`, `:info_hash20:` / `:target20:` anywhere |
-| `tg_utp` | uTP connection start (BEP 29 `ST_SYN`) | `u32`: `0x41 0x00`, conn_id ≠ 0, tdiff 0, seq 1 |
+| `tg_utp` | uTP connection start (BEP 29 `ST_SYN`) | `u32`: bare 20-byte header `0x41 0x00`, conn_id ≠ 0, timestamp ≠ 0, tdiff 0 (seq not checked: libtorrent randomizes it) |
 | `tg_bt` | peer handshake (TCP, uTP) | `\x13BitTorrent protocol` |
 | `tg_http` | HTTP tracker announce | `info_hash=` |
 | `tg_ext` | extension handshake (magnet, PEX) | `ut_metadata` / `ut_pex` |
