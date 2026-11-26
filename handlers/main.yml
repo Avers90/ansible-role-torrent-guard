@@ -5,7 +5,8 @@
 
 ## The script rebuilds the chain only when its version tag differs (mode,
 ## interface, signatures), so this is a no-op on the live rules otherwise.
+## Plain systemctl: the systemd module fails to find a template instance
+## (torrent-guard@rules) that has never been started.
 - name: Apply torrent-guard rules
-  ansible.builtin.systemd:
-    name: torrent-guard@rules.service
-    state: started
+  ansible.builtin.command: systemctl start torrent-guard@rules.service
+  changed_when: true
