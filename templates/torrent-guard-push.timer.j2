@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=torrent-guard: push {{ torrent_guard_push_on_calendar }}
+
+[Timer]
+OnCalendar={{ torrent_guard_push_on_calendar }}
+RandomizedDelaySec={{ torrent_guard_push_randomized_delay }}
+Persistent=true
+Unit=torrent-guard@push.service
+
+[Install]
+WantedBy=timers.target

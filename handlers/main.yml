@@ -1,0 +1,11 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+## The script rebuilds the chain only when its version tag differs (mode,
+## interface, signatures), so this is a no-op on the live rules otherwise.
+- name: Apply torrent-guard rules
+  ansible.builtin.systemd:
+    name: torrent-guard@rules.service
+    state: started

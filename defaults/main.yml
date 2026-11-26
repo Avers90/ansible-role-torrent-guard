@@ -1,0 +1,52 @@
+---
+## Tunnel interface to watch (traffic coming FROM peers, before SNAT)
+torrent_guard_interface: "{{ amneziawg_interface | default(wireguard_interface | default('awg0')) }}"
+
+## CLI used to map tunnel addresses to peers: `awg` (AmneziaWG) or `wg` (WireGuard)
+torrent_guard_wg_cli: "{{ 'awg' if amneziawg_interface is defined else 'wg' }}"
+
+## monitor = record hits only, traffic untouched
+## block   = also drop the matched flow (CONNMARK + DROP in mangle)
+torrent_guard_mode: monitor
+
+## Identifier sent in every batch (the receiver maps it to its own server list)
+torrent_guard_server_code: "{{ inventory_hostname_short }}"
+
+## Scan only the first N packets of every flow (original direction). Every
+## signature lives in the first packets; later ones are file contents.
+torrent_guard_first_packets: 4
+
+## How long a source stays in the hit ipsets after its last hit (seconds)
+torrent_guard_set_timeout: 86400
+
+## Local collection interval (systemd time span). Also re-applies the rules when
+## something (e.g. a firewall run) flushed the mangle table.
+torrent_guard_collect_interval: 5min
+
+## Push target. Empty URL = collect only, push timer is not installed.
+torrent_guard_push_url: ""
+## Bearer token for the push endpoint (keep it in vault). Required with push_url.
+torrent_guard_push_token: ""
+## Push schedule (systemd OnCalendar) and jitter so hosts do not push at once
+torrent_guard_push_on_calendar: hourly
+torrent_guard_push_randomized_delay: 10min
+torrent_guard_push_timeout: 30
+
+## Safety cap for the local buffer (entries = peers)
+torrent_guard_max_entries: 20000
+
+## Own log file (in addition to journald). Empty dir = journald only.
+## Rotated weekly, N weeks kept.
+torrent_guard_log_dir: /var/log/torrent-guard
+torrent_guard_log_rotate_weeks: 8
+
+## Paths
+torrent_guard_state_dir: /var/lib/torrent-guard
+torrent_guard_script: /usr/local/sbin/torrent-guard
+torrent_guard_env_file: /etc/torrent-guard.env
+## connbytes needs conntrack accounting; the role sets it in its own file
+torrent_guard_sysctl_file: /etc/sysctl.d/90-torrent-guard.conf
+
+## systemd resource limits for both units
+torrent_guard_cpu_quota: 10%
+torrent_guard_memory_max: 128M

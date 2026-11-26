@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+[Unit]
+Description=torrent-guard: %i
+After=network-online.target netfilter-persistent.service
+
+[Service]
+Type=oneshot
+EnvironmentFile={{ torrent_guard_env_file }}
+ExecStart=/usr/bin/python3 {{ torrent_guard_script }} %i
+## Never compete with the tunnel
+Nice=19
+IOSchedulingClass=idle
+CPUQuota={{ torrent_guard_cpu_quota }}
+MemoryMax={{ torrent_guard_memory_max }}
+TimeoutStartSec=120
+## Hardening: iptables / ipset / conntrack / awg show need netlink and raw
+## sockets; /run holds the xtables lock
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run {{ ([torrent_guard_state_dir, torrent_guard_log_dir] | select | join(' ')) }}
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW

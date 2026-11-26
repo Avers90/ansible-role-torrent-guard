@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=torrent-guard: collect every {{ torrent_guard_collect_interval }}
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ torrent_guard_collect_interval }}
+AccuracySec=30s
+Unit=torrent-guard@collect.service
+
+[Install]
+WantedBy=timers.target
