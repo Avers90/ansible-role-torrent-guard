@@ -138,7 +138,10 @@ def rule_plan(mode):
             ["-p", "udp", "-m", "multiport", "--dports", SKIP_PORTS, "-j", "RETURN"]]
     if mode == "block":
         main.insert(0, ["-m", "connmark", "--mark", MARK, "-j", "DROP"])
-    main += [match + ["-j", sub_chain(kind)] for kind, match in SIGNATURES]
+    # goto: the sub-chain's RETURN goes back to FORWARD, so a packet matching
+    # several signatures (a DHT query has "d1:ad2:id20:" and ":info_hash20:") is
+    # counted once, under the first kind in SIGNATURES
+    main += [match + ["-g", sub_chain(kind)] for kind, match in SIGNATURES]
     chains = {CHAIN: main}
     for kind in KINDS:
         # Add only when absent: re-adding with --exist resets the entry's counters

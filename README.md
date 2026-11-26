@@ -23,7 +23,10 @@ flow (`connbytes`), skipping TCP/UDP 53 and 443:
 
 A hit adds the source to the ipset (`hash:ip timeout counters`) once; the ipset
 packet counter counts later hits (re-adding with `--exist` would reset it, so the
-entry expires `torrent_guard_set_timeout` after the first hit and starts again). DHT and trackers are what public "who downloads what" crawlers
+entry expires `torrent_guard_set_timeout` after the first hit and starts again). The
+chain jumps to a signature with `-g` (goto), so a packet is counted once, under the
+first matching kind in table order (a DHT `get_peers` query also carries
+`:info_hash20:`; a handshake segment with the extension handshake counts as `tg_bt`). DHT and trackers are what public "who downloads what" crawlers
 see, and a client cannot find peers without them. Encrypted peer traffic (MSE) has
 no signature, but over uTP its header stays plain, so `tg_utp` still sees the
 connection start. A bare `0x4100` would also match TURN/WebRTC media; the full
@@ -139,6 +142,12 @@ sudo tail -n 20 /var/log/torrent-guard/torrent-guard.log
 ```
 
 `--dry-run` never writes the buffer, never changes iptables and never sends.
+
+## Tests
+
+```bash
+python3 -m unittest discover tests
+```
 
 ## License
 
