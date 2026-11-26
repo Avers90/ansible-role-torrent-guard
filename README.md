@@ -14,21 +14,27 @@ flow (`connbytes`), skipping TCP/UDP 53 and 443:
 
 | ipset | What | Match |
 |---|---|---|
-| `tg_trk` | UDP tracker connect (BEP 15) | magic `0x41727101980` at payload start |
-| `tg_dht` | DHT query / reply (KRPC) | `d1:ad2:id20:` / `1:rd2:id20:` |
+| `tg_trk` | UDP tracker connect (BEP 15) | `u32`: magic `0x41727101980` + action 0 |
+| `tg_dht` | DHT query / reply (KRPC) | `d1:ad2:id20:` / `1:rd2:id20:`, `:info_hash20:` / `:target20:` anywhere |
+| `tg_utp` | uTP connection start (BEP 29 `ST_SYN`) | `u32`: `0x41 0x00`, conn_id ≠ 0, tdiff 0, seq 1 |
 | `tg_bt` | peer handshake (TCP, uTP) | `\x13BitTorrent protocol` |
 | `tg_http` | HTTP tracker announce | `info_hash=` |
 | `tg_ext` | extension handshake (magnet, PEX) | `ut_metadata` / `ut_pex` |
 
-A hit adds the source to the ipset (`hash:ip timeout counters`); the ipset packet
-counter counts hits. DHT and trackers are what public "who downloads what" crawlers
+A hit adds the source to the ipset (`hash:ip timeout counters`) once; the ipset
+packet counter counts later hits (re-adding with `--exist` would reset it, so the
+entry expires `torrent_guard_set_timeout` after the first hit and starts again). DHT and trackers are what public "who downloads what" crawlers
 see, and a client cannot find peers without them. Encrypted peer traffic (MSE) has
-no signature — the behaviour signal covers it.
+no signature, but over uTP its header stays plain, so `tg_utp` still sees the
+connection start. A bare `0x4100` would also match TURN/WebRTC media; the full
+header check does not (rules cross-checked with forestsnet/torrent-blocker and nDPI).
 
 **Behaviour** — one `conntrack -L` per run, per tunnel address: flows, distinct
-destination IPs, UDP flows to high ports (not DNS / NTP / QUIC / STUN). The buffer
-keeps the maximum seen since the last push. A browser peaks at tens to low hundreds
-of flows; a torrent client at hundreds to thousands.
+destination IPs, and the fan-out — distinct destination hosts and ports outside
+common service ports (web, DNS, mail, STUN/TURN/RTP, NTP, push, Windows Update
+delivery). The buffer keeps the maximum seen since the last push. A torrent client
+spreads over many hosts **and** many ports; a call or a game launcher reaches many
+hosts on a few ports, a browser stays on 443.
 
 In `block` mode a hit also sets a connmark and drops the packet; later packets of
 the marked flow are dropped too. The peer's other traffic is not affected.
@@ -94,7 +100,8 @@ Every run writes one line to journald and `/var/log/torrent-guard/torrent-guard.
   "sent_at": 1795690800,
   "entries": [
     {"pubkey": "Ab3k...=", "first_seen": 1795687500, "last_seen": 1795690500, "samples": 11,
-     "hits": {"dht": 412, "trk": 3}, "max_flows": 950, "max_dsts": 610, "max_udp_hi": 870}
+     "hits": {"dht": 412, "trk": 3}, "max_flows": 950, "max_dsts": 610, "max_udp_hi": 870,
+     "max_fan_hosts": 480, "max_fan_ports": 455}
   ]
 }
 ```

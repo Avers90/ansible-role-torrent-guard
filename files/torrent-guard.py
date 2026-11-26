@@ -53,20 +53,40 @@ LOCK = os.path.join(STATE_DIR, "lock")
 CHAIN = "TORRENT_GUARD"
 MARK = "0x7470"
 SKIP_PORTS = "53,443"
-COMMON_UDP_PORTS = {53, 123, 443, 3478, 3479, 19302}
+
+## Destination ports where reaching many hosts is normal: web, DNS, NTP/Roughtime, mail,
+## DoT, RTSP/RTMP, STUN/TURN/RTP (calls), XMPP/push, Windows Update delivery (7680).
+## Not counted in the fan-out; list after forestsnet/torrent-blocker measurements.
+COMMON_PORTS = frozenset(
+    {22, 53, 80, 123, 443, 465, 554, 587, 853, 993, 995, 1935, 2002, 5222, 5223, 5228,
+     5349, 7680, 8080, 8443}
+    | set(range(3478, 3498)) | set(range(16384, 16404)) | set(range(19302, 19310))
+)
 
 ## xt_string offsets count from the start of the IP header
 UDP_PAYLOAD = 20 + 8
+## xt_u32: start of the UDP payload whatever the IP header length
+U32_PAYLOAD = "0>>22&0x3C@"
 
 ## kind -> iptables match arguments
 SIGNATURES = [
-    ("trk", ["-p", "udp", "-m", "string", "--algo", "bm", "--hex-string", "|0000041727101980|",
-             "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 12)]),
+    # BEP 15 connect: magic 0x41727101980 + action 0
+    ("trk", ["-p", "udp", "-m", "u32", "--u32",
+             f"{U32_PAYLOAD}8=0x417 && {U32_PAYLOAD}12=0x27101980 && {U32_PAYLOAD}16=0"]),
     ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", "d1:ad2:id20:",
              "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 36)]),
     # BEP 42: a reply may start with the "ip" key, so "1:r..." is not at offset 0
     ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", "1:rd2:id20:",
              "--from", str(UDP_PAYLOAD), "--to", str(UDP_PAYLOAD + 68)]),
+    # Keys nDPI looks for anywhere: clients that do not sort the bencode dict
+    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", ":info_hash20:"]),
+    ("dht", ["-p", "udp", "-m", "string", "--algo", "bm", "--string", ":target20:"]),
+    # BEP 29 ST_SYN: version 1/type SYN, no extension, conn_id != 0, tdiff 0, seq 1.
+    # The uTP header stays plain under MSE, so this sees encrypted peers too. A bare
+    # 0x4100 also matches TURN/WebRTC media; the full header check does not.
+    ("utp", ["-p", "udp", "-m", "u32", "--u32",
+             f"{U32_PAYLOAD}8>>16=0x4100 && {U32_PAYLOAD}8&0xFFFF=1:0xFFFF"
+             f" && {U32_PAYLOAD}16=0 && {U32_PAYLOAD}24>>16=1"]),
     ("bt", ["-m", "string", "--algo", "bm", "--string", "BitTorrent protocol", "--to", "160"]),
     ("http", ["-p", "tcp", "-m", "string", "--algo", "bm", "--string", "info_hash=", "--to", "1024"]),
     ("ext", ["-m", "string", "--algo", "bm", "--string", "ut_metadata"]),
@@ -118,7 +138,9 @@ def rule_plan(mode):
     main += [match + ["-j", sub_chain(kind)] for kind, match in SIGNATURES]
     chains = {CHAIN: main}
     for kind in KINDS:
-        rules = [["-j", "SET", "--add-set", set_name(kind), "src", "--exist"]]
+        # Add only when absent: re-adding with --exist resets the entry's counters
+        rules = [["-m", "set", "!", "--match-set", set_name(kind), "src", "!", "--update-counters",
+                  "-j", "SET", "--add-set", set_name(kind), "src"]]
         if mode == "block":
             rules.append(["-j", "CONNMARK", "--set-mark", MARK])
         verdict = "DROP" if mode == "block" else "RETURN"
@@ -230,9 +252,17 @@ def parse_ipset(text):
     return out
 
 
+## Per-peer conntrack metrics; the buffer keeps max_<name> of each
+METRICS = ("flows", "dsts", "udp_hi", "fan_hosts", "fan_ports")
+
+
 def parse_conntrack(text, known):
-    """conntrack -L -f ipv4 lines -> {src: {"flows", "dsts", "udp_hi"}} for src in `known`.
-    IPv4 output is already canonical, so addresses are compared as printed."""
+    """conntrack -L -f ipv4 lines -> {src: {metric: value}} for src in `known`.
+    IPv4 output is already canonical, so addresses are compared as printed.
+
+    fan_hosts / fan_ports: distinct destinations and ports outside COMMON_PORTS.
+    A torrent client spreads over many hosts AND many ports; a game launcher or a
+    call reaches many hosts on a few ports."""
     stats = {}
     for line in text.splitlines():
         start = line.find(" src=")
@@ -249,17 +279,18 @@ def parse_conntrack(text, known):
         dst = orig.get("dst")
         if not dst:
             continue
-        cur = stats.setdefault(src, {"flows": 0, "dsts": set(), "udp_hi": 0})
+        cur = stats.setdefault(src, {"flows": 0, "dsts": set(), "udp_hi": 0,
+                                     "fan_hosts": set(), "fan_ports": set()})
         cur["flows"] += 1
         cur["dsts"].add(dst)
-        if line.split(None, 1)[0] == "udp":
-            try:
-                dport = int(orig.get("dport", "0"))
-            except ValueError:
-                dport = 0
-            if dport >= 1024 and dport not in COMMON_UDP_PORTS:
-                cur["udp_hi"] += 1
-    return {ip: {"flows": s["flows"], "dsts": len(s["dsts"]), "udp_hi": s["udp_hi"]}
+        dport = orig.get("dport")
+        if dport is None or not dport.isdigit() or int(dport) in COMMON_PORTS:
+            continue
+        cur["fan_hosts"].add(dst)
+        cur["fan_ports"].add(dport)
+        if int(dport) >= 1024 and line.split(None, 1)[0] == "udp":
+            cur["udp_hi"] += 1
+    return {ip: {m: len(v) if isinstance(v, set) else v for m, v in s.items()}
             for ip, s in stats.items()}
 
 
@@ -337,16 +368,14 @@ def merge(entries, peers, stats, deltas, now):
         if cur is None:
             if len(entries) >= MAX_ENTRIES:
                 continue
-            cur = entries[pubkey] = {"first_seen": now, "samples": 0, "hits": {},
-                                     "max_flows": 0, "max_dsts": 0, "max_udp_hi": 0}
+            cur = entries[pubkey] = {"first_seen": now, "samples": 0, "hits": {}}
         cur["last_seen"] = now
         cur["samples"] += 1
         for kind, delta in per_ip.get(ip, {}).items():
             cur["hits"][kind] = cur["hits"].get(kind, 0) + delta
-        s = stats.get(ip, {"flows": 0, "dsts": 0, "udp_hi": 0})
-        cur["max_flows"] = max(cur["max_flows"], s["flows"])
-        cur["max_dsts"] = max(cur["max_dsts"], s["dsts"])
-        cur["max_udp_hi"] = max(cur["max_udp_hi"], s["udp_hi"])
+        s = stats.get(ip, {})
+        for m in METRICS:
+            cur[f"max_{m}"] = max(cur.get(f"max_{m}", 0), s.get(m, 0))
     return orphan
 
 
@@ -386,7 +415,8 @@ def push(dry_run=False):
         top = sorted(body["entries"], key=lambda e: -sum(e["hits"].values()))[:10]
         log(f"push (dry-run): would POST {len(entries)} entries to {URL or '(no URL)'}")
         for e in top:
-            log(f"  {e['pubkey']} hits={e['hits']} max_flows={e['max_flows']} max_dsts={e['max_dsts']}")
+            log(f"  {e['pubkey']} hits={e['hits']} max_flows={e.get('max_flows', 0)} "
+                f"fan={e.get('max_fan_hosts', 0)}/{e.get('max_fan_ports', 0)}")
         return
     if not URL or not TOKEN:
         log("push: URL or token not set, skipped")
@@ -426,15 +456,16 @@ def status(dry_run=False):
 
 
 def show(dry_run=False):
-    """Buffer since the last push: peers with hits first, then by peak flows."""
+    """Buffer since the last push: peers with hits first, then by fan-out."""
     entries = load_buffer()
-    log(f"{'pubkey':44}  {'hits':32}  flows  dsts  udp_hi  samples")
+    log(f"{'pubkey':44}  {'hits':32}  flows  dsts  fan_hosts/ports  samples")
     rows = sorted(entries.items(),
-                  key=lambda kv: (-sum(kv[1]["hits"].values()), -kv[1]["max_flows"]))
+                  key=lambda kv: (-sum(kv[1]["hits"].values()), -kv[1].get("max_fan_ports", 0)))
     for pubkey, e in rows:
         hits = ",".join(f"{k}={v}" for k, v in sorted(e["hits"].items())) or "-"
-        log(f"{pubkey:44}  {hits:32}  {e['max_flows']:5}  {e['max_dsts']:4}  "
-            f"{e['max_udp_hi']:6}  {e['samples']:7}")
+        fan = f"{e.get('max_fan_hosts', 0)}/{e.get('max_fan_ports', 0)}"
+        log(f"{pubkey:44}  {hits:32}  {e.get('max_flows', 0):5}  {e.get('max_dsts', 0):4}  "
+            f"{fan:>15}  {e['samples']:7}")
 
 
 def main():
